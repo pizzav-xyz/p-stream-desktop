@@ -1,4 +1,7 @@
 const { app, BrowserWindow, BrowserView, session, ipcMain, dialog, globalShortcut, shell } = require('electron');
+// Adblock functionality
+const { ElectronBlocker } = require('@ghostery/adblocker-electron');
+const fetch = require('cross-fetch');
 const path = require('path');
 const { handlers, setupInterceptors } = require('./ipc-handlers');
 const { autoUpdater } = require('electron-updater');
@@ -1078,6 +1081,19 @@ app.whenReady().then(async () => {
 
   // Initialize Discord RPC
   discordRPC.initialize(store);
+
+  // Initialize adblocker
+  try {
+    const adblocker = await ElectronBlocker.fromPrebuiltAdsAndTracking(fetch);
+
+    // Enable blocking in the BrowserView session
+    if (mainBrowserView && mainBrowserView.webContents) {
+      adblocker.enableBlockingInSession(mainBrowserView.webContents.session);
+    }
+  } catch (error) {
+    console.error('Failed to initialize adblocker:', error);
+  }
+
 
   // Register IPC handlers
   Object.entries(handlers).forEach(([channel, handler]) => {

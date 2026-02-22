@@ -166,22 +166,6 @@ jobs:
                   LINUX_SHA512="$SHA512"
                   LINUX_SIZE="$SIZE"
                 fi
-              elif [[ "$filename" == *.exe ]]; then
-                fi
-              elif [[ "$filename" == *.dmg ]]; then
-                if [ -z "$MACOS_FILE" ]; then
-                  MACOS_FILE="$filename"
-                  MACOS_SHA512="$SHA512"
-                  MACOS_SIZE="$SIZE"
-                fi
-              elif [[ "$filename" == *.zip ]]; then
-                # Only use .zip if .dmg wasn't found
-                if [ -z "$MACOS_FILE" ]; then
-                  MACOS_FILE="$filename"
-                  MACOS_SHA512="$SHA512"
-                  MACOS_SIZE="$SIZE"
-                fi
-              fi
               fi
             fi
           done
@@ -202,31 +186,6 @@ jobs:
             } > "update-metadata/latest-linux.yml"
           fi
 
-          if [ -n "$WINDOWS_FILE" ]; then
-            {
-              echo "version: $VERSION"
-              echo "files:"
-              echo "  - url: $WINDOWS_FILE"
-              echo "    sha512: $WINDOWS_SHA512"
-              echo "    size: $WINDOWS_SIZE"
-              echo "path: $WINDOWS_FILE"
-              echo "sha512: $WINDOWS_SHA512"
-              echo "releaseDate: $RELEASE_DATE"
-            } > "update-metadata/latest.yml"
-          fi
-
-          if [ -n "$MACOS_FILE" ]; then
-            {
-              echo "version: $VERSION"
-              echo "files:"
-              echo "  - url: $MACOS_FILE"
-              echo "    sha512: $MACOS_SHA512"
-              echo "    size: $MACOS_SIZE"
-              echo "path: $MACOS_FILE"
-              echo "sha512: $MACOS_SHA512"
-              echo "releaseDate: $RELEASE_DATE"
-            } > "update-metadata/latest-mac.yml"
-          fi
 
           # Upload update metadata files
           if ls update-metadata/*.yml 1> /dev/null 2>&1; then

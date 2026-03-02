@@ -780,39 +780,50 @@ function createWindow() {
         window.__pstreamSubtitleFixInjected = true;
 
         // --- JS: move custom subtitle overlays inside the fullscreen element ---
-        // Selectors covering common open-source and commercial video players.
-        const SUBTITLE_SELECTORS = [
-          '.vjs-text-track-display',          // Video.js
-          '.shaka-text-container',            // Shaka Player
-          '.plyr__captions',                  // Plyr
-          '.jw-captions',                     // JW Player
-          '.fp-captions',                     // Flowplayer
-          '.mejs-captions-layer',             // MediaElement.js
-          '.html5-video-subtitles',           // YouTube-style players
+        // Build a candidate set at injection time using a MutationObserver so that
+        // fullscreen transitions only iterate the (small) set of known overlay elements
+        // rather than running 13 querySelectorAll scans (including expensive [class*=…]
+        // substring scans) across an unpredictably large DOM on every fullscreen enter.
+        const COMBINED_SELECTOR = [
+          '.vjs-text-track-display',       // Video.js
+          '.shaka-text-container',         // Shaka Player
+          '.plyr__captions',               // Plyr
+          '.jw-captions',                  // JW Player
+          '.fp-captions',                  // Flowplayer
+          '.mejs-captions-layer',          // MediaElement.js
+          '.html5-video-subtitles',        // YouTube-style players
           '[class*="subtitle-container"]',
           '[class*="subtitles-container"]',
           '[class*="caption-container"]',
           '[class*="captions-container"]',
           '[class*="text-track-container"]',
-        ];
+        ].join(',');
+
+        // Seed the candidate set with elements already in the DOM.
+        const candidates = new Set(document.querySelectorAll(COMBINED_SELECTOR));
+
+        // Keep the set up-to-date as the player injects its overlay elements.
+        const candidateObserver = new MutationObserver((mutations) => {
+          for (const { addedNodes } of mutations) {
+            for (const node of addedNodes) {
+              if (node.nodeType !== 1) continue;
+              try {
+                if (node.matches(COMBINED_SELECTOR)) candidates.add(node);
+                node.querySelectorAll(COMBINED_SELECTOR).forEach((el) => candidates.add(el));
+              } catch (e) {}
+            }
+          }
+        });
+        candidateObserver.observe(document.documentElement, { childList: true, subtree: true });
 
         // Map of moved elements -> { parent, nextSibling } for restoration
         const movedElements = new Map();
 
         const moveSubtitlesIntoFullscreen = (fsEl) => {
-          SUBTITLE_SELECTORS.forEach((selector) => {
-            try {
-              document.querySelectorAll(selector).forEach((el) => {
-                if (!fsEl.contains(el)) {
-                  movedElements.set(el, {
-                    parent: el.parentElement,
-                    nextSibling: el.nextSibling,
-                  });
-                  fsEl.appendChild(el);
-                }
-              });
-            } catch (e) {
-              // ignore invalid selectors on older runtimes
+          candidates.forEach((el) => {
+            if (!fsEl.contains(el)) {
+              movedElements.set(el, { parent: el.parentElement, nextSibling: el.nextSibling });
+              fsEl.appendChild(el);
             }
           });
         };

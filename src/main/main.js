@@ -1,25 +1,11 @@
-const {
-  app,
-  BrowserWindow,
-  BrowserView,
-  session,
-  ipcMain,
-  dialog,
-  globalShortcut,
-  shell,
-  protocol,
-  net,
-} = require('electron');
+const { app, BrowserWindow, BrowserView, session, ipcMain, dialog, globalShortcut, shell } = require('electron');
 const path = require('path');
-const { pathToFileURL } = require('url');
 const { handlers, setupInterceptors } = require('./ipc-handlers');
 const { autoUpdater } = require('electron-updater');
 const SimpleStore = require('./storage');
 const discordRPC = require('./discord-rpc');
 const { checkAndAutoUpdate } = require('./auto-updater');
 const warpProxy = require('./warp-proxy');
-const downloadManager = require('./download-manager');
-
 // Register custom protocol scheme before app is ready (required for streaming/range requests)
 protocol.registerSchemesAsPrivileged([{ scheme: 'pstream', privileges: { stream: true, supportFetchAPI: true } }]);
 
@@ -503,7 +489,6 @@ function createWindow() {
         </head>
         <body>
           <button class="settings-btn secondary" onclick="if(window.__PSTREAM_OPEN_SETTINGS__)window.__PSTREAM_OPEN_SETTINGS__()">Open Settings</button>
-          <button class="settings-btn" style="bottom: 70px" onclick="if(window.__PSTREAM_OPEN_OFFLINE__)window.__PSTREAM_OPEN_OFFLINE__()">View Offline Downloads</button>
           <div class="error-box">
             <h1>Failed to connect</h1>
             <p>Could not load the page.</p>
@@ -1240,6 +1225,7 @@ app.whenReady().then(async () => {
     });
   });
 
+<<<<<<< HEAD
   // Only allow download IPC from the BrowserView's own webContents
   function isAllowedDownloadSender(event) {
     return mainBrowserView && event.sender === mainBrowserView.webContents;
@@ -1317,6 +1303,8 @@ app.whenReady().then(async () => {
     return true;
   });
 
+=======
+>>>>>>> parent of 5c802b9 (add downloading functionality (#33))
   ipcMain.handle('openControlPanel', () => {
     openSettingsWindow();
   });

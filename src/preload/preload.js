@@ -1,12 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Channels safe to invoke from any origin (non-sensitive read-only / navigation)
 const PUBLIC_CHANNELS = ['hello', 'makeRequest', 'prepareStream', 'openPage', 'updateMediaMetadata', 'openOfflineApp'];
-
-// Channels that should only be invoked from trusted (local file://) pages
-const PRIVILEGED_CHANNELS = ['startDownload', 'getDownloads', 'deleteDownload'];
-
-const ALL_CHANNELS = [...PUBLIC_CHANNELS, ...PRIVILEGED_CHANNELS];
 
 function isLocalOrigin() {
   try {
@@ -27,44 +21,38 @@ window.addEventListener('message', async (event) => {
   // and are NOT marked as 'relayed' (to avoid infinite loops)
   if (!data || !data.name || data.relayed) return;
 
-  if (!ALL_CHANNELS.includes(data.name)) return;
+  if (PUBLIC_CHANNELS.includes(data.name)) {
+    try {
+      // Forward to Main Process
+      const response = await ipcRenderer.invoke(data.name, data.body);
 
-  // Block privileged channels from remote origins
-  if (PRIVILEGED_CHANNELS.includes(data.name) && !isLocalOrigin()) {
-    console.warn(`[Preload] Blocked privileged IPC "${data.name}" from non-local origin`);
-    return;
-  }
-
-  try {
-    // Forward to Main Process
-    const response = await ipcRenderer.invoke(data.name, data.body);
-
-    // Send response back to window (only if it's not a one-way update like updateMediaMetadata)
-    if (data.name !== 'updateMediaMetadata') {
-      window.postMessage(
-        {
-          name: data.name,
-          relayId: data.relayId,
-          instanceId: data.instanceId,
-          body: response,
-          relayed: true,
-        },
-        '*',
-      ); // Target origin * is okay here as we validated source === window
-    }
-  } catch (error) {
-    console.error(`[Preload] Error handling ${data.name}:`, error);
-    if (data.name !== 'updateMediaMetadata') {
-      window.postMessage(
-        {
-          name: data.name,
-          relayId: data.relayId,
-          instanceId: data.instanceId,
-          body: { success: false, error: 'An unexpected error occurred.' },
-          relayed: true,
-        },
-        '*',
-      );
+      // Send response back to window (only if it's not a one-way update like updateMediaMetadata)
+      if (data.name !== 'updateMediaMetadata') {
+        window.postMessage(
+          {
+            name: data.name,
+            relayId: data.relayId,
+            instanceId: data.instanceId,
+            body: response,
+            relayed: true,
+          },
+          '*',
+        ); // Target origin * is okay here as we validated source === window
+      }
+    } catch (error) {
+      console.error(`[Preload] Error handling ${data.name}:`, error);
+      if (data.name !== 'updateMediaMetadata') {
+        window.postMessage(
+          {
+            name: data.name,
+            relayId: data.relayId,
+            instanceId: data.instanceId,
+            body: { success: false, error: error.message },
+            relayed: true,
+          },
+          '*',
+        );
+      }
     }
   }
 });
@@ -84,22 +72,6 @@ contextBridge.exposeInMainWorld('__PSTREAM_OPEN_DEVTOOLS__', () => {
   ipcRenderer.send('open-embed-devtools');
 });
 
-// Expose function to trigger offline mode view
-contextBridge.exposeInMainWorld('__PSTREAM_OPEN_OFFLINE__', () => {
-  ipcRenderer.invoke('openOfflineApp');
-});
-
-// Expose setup API for the setup page
-contextBridge.exposeInMainWorld('__PSTREAM_SETUP__', {
-  saveDomain: (domain) => ipcRenderer.invoke('save-domain', domain),
-});
-
-// Expose desktopApi for the web app to trigger downloads and open offline page
-contextBridge.exposeInMainWorld('desktopApi', {
-  startDownload: (data) => ipcRenderer.invoke('startDownload', data),
-  openOffline: () => ipcRenderer.invoke('openOfflineApp'),
-});
-
 // Expose WARP controls for the "failed to load" error page (turn on WARP, then reload)
 contextBridge.exposeInMainWorld('__PSTREAM_SET_WARP_ENABLED__', (enabled) =>
   ipcRenderer.invoke('set-warp-enabled', enabled),
@@ -111,24 +83,6 @@ contextBridge.exposeInMainWorld('__PSTREAM_RELOAD_STREAM_PAGE__', () => ipcRende
 window.addEventListener('pstream-desktop-settings', () => {
   ipcRenderer.send('open-settings');
 });
-
-// Forward download events from main process to web app
-ipcRenderer.on('download-progress', (_event, data) =>
-  window.postMessage({ name: 'download-progress', body: data }, '*'),
-);
-ipcRenderer.on('download-complete', (_event, data) =>
-  window.postMessage({ name: 'download-complete', body: data }, '*'),
-);
-ipcRenderer.on('download-error', (_event, data) =>
-  window.postMessage(
-    {
-      name: 'download-error',
-      body: { id: data.id, error: 'Download failed. Please try again.' },
-    },
-    '*',
-  ),
-);
-
 console.log('P-Stream Desktop Preload Loaded');
 
 let lastThemeColor = null;

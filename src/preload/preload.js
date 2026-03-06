@@ -1,6 +1,14 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-const VALID_CHANNELS = ['hello', 'makeRequest', 'prepareStream', 'openPage', 'updateMediaMetadata'];
+const PUBLIC_CHANNELS = ['hello', 'makeRequest', 'prepareStream', 'openPage', 'updateMediaMetadata', 'openOfflineApp'];
+
+function isLocalOrigin() {
+  try {
+    return window.location.protocol === 'file:';
+  } catch {
+    return false;
+  }
+}
 
 window.addEventListener('message', async (event) => {
   // Security check: only accept messages from the same window
@@ -13,7 +21,7 @@ window.addEventListener('message', async (event) => {
   // and are NOT marked as 'relayed' (to avoid infinite loops)
   if (!data || !data.name || data.relayed) return;
 
-  if (VALID_CHANNELS.includes(data.name)) {
+  if (PUBLIC_CHANNELS.includes(data.name)) {
     try {
       // Forward to Main Process
       const response = await ipcRenderer.invoke(data.name, data.body);
@@ -49,8 +57,10 @@ window.addEventListener('message', async (event) => {
   }
 });
 
-// Expose flag so the web app knows it's running in the desktop client
+// Expose flags and APIs so the web app knows it's running in the desktop client
 contextBridge.exposeInMainWorld('__PSTREAM_DESKTOP__', true);
+contextBridge.exposeInMainWorld('isDesktopApp', true); // Compatibility alias
+contextBridge.exposeInMainWorld('PSTREAM_DESKTOP', true); // Another common pattern
 
 // Expose function to open settings
 contextBridge.exposeInMainWorld('__PSTREAM_OPEN_SETTINGS__', () => {
@@ -73,7 +83,6 @@ contextBridge.exposeInMainWorld('__PSTREAM_RELOAD_STREAM_PAGE__', () => ipcRende
 window.addEventListener('pstream-desktop-settings', () => {
   ipcRenderer.send('open-settings');
 });
-
 console.log('P-Stream Desktop Preload Loaded');
 
 let lastThemeColor = null;

@@ -15,12 +15,25 @@ const ROOT = path.join(__dirname, '..', '..');
 const PRELOAD = path.join(__dirname, '..', 'preload');
 const RENDERER = path.join(__dirname, '..', 'renderer');
 const SETTINGS = path.join(__dirname, '..', 'settings');
+const SETUP = path.join(__dirname, '..', 'setup');
+const SETUP_PRELOAD = path.join(__dirname, '..', 'preload', 'preload-setup.js');
 
 // Settings store (will be initialized when app is ready)
-let store = null;
+const store = new SimpleStore({
+  configName: 'user-preferences',
+  defaults: {
+    discordRPCEnabled: true,
+    hardwareAcceleration: true,
+    warpLaunchEnabled: false,
+    volumeBoost: 1.0,
+  },
+});
 
 // Settings window reference
 let settingsWindow = null;
+
+// Setup window reference
+let setupWindow = null;
 
 // BrowserView reference (for reset functionality)
 let mainBrowserView = null;
@@ -155,7 +168,7 @@ function createWindow() {
   // Attach CORS bypass (extension-equivalent): add CORS headers to responses that match
   // rules registered via prepareStream IPC from the page.
   setupInterceptors(view.webContents.session, {
-    getStreamHostname: () => (store ? store.get('streamUrl', 'pstream.mov') : 'pstream.mov'),
+    getStreamHostname: () => (store ? store.get('streamUrl') : null),
   });
 
   // Allow WebAuthn passkey flows for the current origin only; allow fullscreen for the web player
@@ -228,6 +241,15 @@ function createWindow() {
   mainWindow.on('resize', resizeView);
   mainWindow.on('maximize', () => mainWindow.webContents.send('window-maximized', true));
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('window-maximized', false));
+
+  // Redirect focus to the BrowserView (the web page) when the main window is focused
+  // This ensures that keyboard shortcuts (like Space for pause/play) work correctly
+  // after alt-tabbing back to the app, instead of triggering window control buttons.
+  mainWindow.on('focus', () => {
+    if (view && view.webContents) {
+      view.webContents.focus();
+    }
+  });
 
   // Aggressively hide menu bar in fullscreen - set up interval to continuously check
   let fullscreenMenuBarInterval = null;
@@ -321,8 +343,13 @@ function createWindow() {
     }
   });
 
-  // Get the saved stream URL or use default
-  const streamUrl = store ? store.get('streamUrl', 'pstream.mov') : 'pstream.mov';
+  // Get the saved stream URL
+  const streamUrl = store ? store.get('streamUrl') : null;
+  if (!streamUrl) {
+    createSetupWindow();
+    return;
+  }
+
   const fullUrl =
     streamUrl.startsWith('http://') || streamUrl.startsWith('https://') ? streamUrl : `https://${streamUrl}/`;
   view.webContents.loadURL(fullUrl);
@@ -751,16 +778,141 @@ function createWindow() {
     view.webContents.executeJavaScript(script).catch(() => {});
   };
 
+  // Inject fix for subtitles not showing in fullscreen.
+  // In Electron's BrowserView, Chromium's "top layer" model means that subtitle overlay
+  // elements positioned outside the fullscreen element are not painted. This injection:
+  //   1. Adds CSS to ensure native <track>-based subtitle containers are always visible.
+  //   2. Listens for fullscreenchange and moves common subtitle container elements inside
+  //      the fullscreen element, then restores their original position on exit.
+  const injectSubtitleFullscreenFix = () => {
+    const script = `
+      (function() {
+        if (window.__pstreamSubtitleFixInjected) return;
+
+        // --- CSS: ensure native WebVTT text-track containers are always visible ---
+        // Use documentElement as a fallback in case <head> doesn't exist yet
+        // (did-navigate can fire before the DOM is fully parsed).
+        const style = document.createElement('style');
+        style.textContent = \`
+          video::-webkit-media-text-track-container,
+          video::-webkit-media-text-track-display,
+          video::-webkit-media-text-track-background,
+          video::cue {
+            display: block !important;
+            visibility: visible !important;
+            overflow: visible !important;
+          }
+        \`;
+        (document.head || document.documentElement).appendChild(style);
+
+        // Set the guard only after the style is safely inserted so a failed early
+        // injection doesn't permanently block a later retry.
+        window.__pstreamSubtitleFixInjected = true;
+
+        // --- JS: move custom subtitle overlays inside the fullscreen element ---
+        // Build a candidate set at injection time using a MutationObserver so that
+        // fullscreen transitions only iterate the (small) set of known overlay elements
+        // rather than running 13 querySelectorAll scans (including expensive [class*=…])
+        // substring scans) across an unpredictably large DOM on every fullscreen enter.
+        const COMBINED_SELECTOR = [
+          '.vjs-text-track-display',       // Video.js
+          '.shaka-text-container',         // Shaka Player
+          '.plyr__captions',               // Plyr
+          '.jw-captions',                  // JW Player
+          '.fp-captions',                  // Flowplayer
+          '.mejs-captions-layer',          // MediaElement.js
+          '.html5-video-subtitles',        // YouTube-style players
+          '[class*="subtitle-container"]',
+          '[class*="subtitles-container"]',
+          '[class*="caption-container"]',
+          '[class*="captions-container"]',
+          '[class*="text-track-container"]',
+        ].join(',');
+
+        // Seed the candidate set with elements already in the DOM.
+        const candidates = new Set(document.querySelectorAll(COMBINED_SELECTOR));
+
+        // Keep the set up-to-date as the player injects its overlay elements.
+        const candidateObserver = new MutationObserver((mutations) => {
+          for (const { addedNodes } of mutations) {
+            for (const node of addedNodes) {
+              if (node.nodeType !== 1) continue;
+              try {
+                if (node.matches(COMBINED_SELECTOR)) candidates.add(node);
+                node.querySelectorAll(COMBINED_SELECTOR).forEach((el) => candidates.add(el));
+              } catch (e) {}
+            }
+          }
+        });
+        candidateObserver.observe(document.documentElement, { childList: true, subtree: true });
+
+        // Map of moved elements -> { parent, nextSibling } for restoration
+        const movedElements = new Map();
+
+        const moveSubtitlesIntoFullscreen = (fsEl) => {
+          candidates.forEach((el) => {
+            if (!fsEl.contains(el)) {
+              movedElements.set(el, { parent: el.parentElement, nextSibling: el.nextSibling });
+              fsEl.appendChild(el);
+            }
+          });
+        };
+
+        const restoreSubtitles = () => {
+          movedElements.forEach(({ parent, nextSibling }, el) => {
+            try {
+              if (parent) {
+                if (nextSibling && nextSibling.parentNode === parent) {
+                  parent.insertBefore(el, nextSibling);
+                } else {
+                  parent.appendChild(el);
+                }
+              }
+            } catch (e) {}
+          });
+          movedElements.clear();
+        };
+
+        document.addEventListener('fullscreenchange', () => {
+          if (document.fullscreenElement) {
+            moveSubtitlesIntoFullscreen(document.fullscreenElement);
+          } else {
+            restoreSubtitles();
+          }
+        });
+
+        // Also handle webkit-prefixed fullscreen (belt-and-suspenders for older Chromium)
+        document.addEventListener('webkitfullscreenchange', () => {
+          const fsEl = document.webkitFullscreenElement || document.fullscreenElement;
+          if (fsEl) {
+            moveSubtitlesIntoFullscreen(fsEl);
+          } else {
+            restoreSubtitles();
+          }
+        });
+
+        // If already in fullscreen when this script runs (e.g. inject fired after the
+        // fullscreenchange event), apply the fix immediately without waiting for an event.
+        const currentFs = document.fullscreenElement || document.webkitFullscreenElement;
+        if (currentFs) moveSubtitlesIntoFullscreen(currentFs);
+      })();
+    `;
+    view.webContents.executeJavaScript(script).catch(console.error);
+  };
+
   // Inject media watcher when page loads
   view.webContents.on('did-finish-load', () => {
     injectMediaWatcher();
     injectDevToolsShortcut();
+    injectSubtitleFullscreenFix();
   });
 
   // Also inject on navigation
   view.webContents.on('did-navigate', () => {
     setTimeout(injectMediaWatcher, 1000);
     setTimeout(injectDevToolsShortcut, 100);
+    // Small delay so the DOM (including <head>) is available before the style injection.
+    setTimeout(injectSubtitleFullscreenFix, 200);
   });
 
   // Update title when page title changes
@@ -850,6 +1002,46 @@ function openSettingsWindow(parentWindow = null) {
 
   settingsWindow.on('closed', () => {
     settingsWindow = null;
+  });
+}
+
+function createSetupWindow() {
+  if (setupWindow) {
+    setupWindow.focus();
+    return;
+  }
+
+  const platform = process.env.PLATFORM_OVERRIDE || process.platform;
+  const isMac = platform === 'darwin';
+  const iconPath = path.join(ROOT, isMac ? 'app.icns' : 'logo.png');
+
+  setupWindow = new BrowserWindow({
+    width: 600,
+    height: 400,
+    minWidth: 400,
+    minHeight: 300,
+    resizable: false,
+    autoHideMenuBar: true,
+    backgroundColor: '#1f2025',
+    icon: iconPath,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: SETUP_PRELOAD,
+    },
+    title: 'P-Stream Setup',
+    show: false,
+  });
+
+  setupWindow.setMenu(null);
+  setupWindow.loadFile(path.join(SETUP, 'setup.html'));
+
+  setupWindow.once('ready-to-show', () => {
+    setupWindow.show();
+  });
+
+  setupWindow.on('closed', () => {
+    setupWindow = null;
   });
 }
 
@@ -1067,17 +1259,6 @@ app.whenReady().then(async () => {
     // Update is being installed, app is quitting
     return;
   }
-
-  // Initialize settings store (after app is ready so app.getPath works)
-  store = new SimpleStore({
-    defaults: {
-      discordRPCEnabled: true,
-      streamUrl: 'pstream.mov',
-      hardwareAcceleration: true,
-      warpLaunchEnabled: false,
-      volumeBoost: 1.0,
-    },
-  });
 
   // Initialize Discord RPC
   discordRPC.initialize(store);
@@ -1489,8 +1670,8 @@ ipcMain.handle('get-app-version', () => {
 
 // IPC handlers for stream URL
 ipcMain.handle('get-stream-url', () => {
-  if (!store) return 'pstream.mov';
-  return store.get('streamUrl', 'pstream.mov');
+  if (!store) return null;
+  return store.get('streamUrl');
 });
 
 ipcMain.handle('set-stream-url', async (event, url) => {
@@ -1525,6 +1706,47 @@ ipcMain.handle('set-stream-url', async (event, url) => {
   return true;
 });
 
+// IPC handler for saving the domain from the setup window
+ipcMain.handle('save-domain', async (event, domain) => {
+  try {
+    if (!store) {
+      throw new Error('Settings store not available');
+    }
+
+    let normalizedDomain = domain.trim();
+
+    if (!normalizedDomain || normalizedDomain.length === 0) {
+      throw new Error('Domain cannot be empty');
+    }
+
+    // Basic validation: ensure it looks like a domain or IP
+    if (!normalizedDomain.includes('.') && !normalizedDomain.match(/^\d{1,3}(\.\d{1,3}){3}$/)) {
+      throw new Error('Please enter a valid domain or IP address (e.g., pstream.example.com or 192.168.1.1)');
+    }
+
+    store.set('streamUrl', normalizedDomain);
+
+    // Close the setup window
+    if (setupWindow) {
+      setupWindow.close();
+    }
+
+    // Load the stream URL into the main BrowserView
+    if (mainBrowserView && mainBrowserView.webContents) {
+      const fullUrl =
+        normalizedDomain.startsWith('http://') || normalizedDomain.startsWith('https://')
+          ? normalizedDomain
+          : `https://${normalizedDomain}/`;
+      mainBrowserView.webContents.loadURL(fullUrl);
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Failed to save domain:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 // IPC handler for resetting the app
 ipcMain.handle('reset-app', async () => {
   try {
@@ -1548,11 +1770,9 @@ ipcMain.handle('reset-app', async () => {
       storages: ['cookies', 'localstorage', 'sessionstorage', 'indexdb', 'websql', 'cachestorage', 'filesystem'],
     });
 
-    // Reload the BrowserView with the default URL
-    if (mainBrowserView && mainBrowserView.webContents) {
-      const defaultUrl = 'https://pstream.mov/';
-      mainBrowserView.webContents.loadURL(defaultUrl);
-    }
+    // Reload the app
+    app.relaunch();
+    app.exit();
 
     return { success: true };
   } catch (error) {
@@ -1624,7 +1844,11 @@ ipcMain.handle('set-warp-enabled', async (event, enabled) => {
 // Reload the stream page (used from the "failed to load" error page after turning on WARP)
 ipcMain.handle('reload-stream-page', () => {
   if (!mainBrowserView || !mainBrowserView.webContents) return;
-  const streamUrl = store ? store.get('streamUrl', 'pstream.mov') : 'pstream.mov';
+  const streamUrl = store ? store.get('streamUrl') : null;
+  if (!streamUrl) {
+    mainBrowserView.webContents.loadFile(path.join(SETUP, 'setup.html'));
+    return;
+  }
   const fullUrl =
     streamUrl.startsWith('http://') || streamUrl.startsWith('https://') ? streamUrl : `https://${streamUrl}/`;
   mainBrowserView.webContents.loadURL(fullUrl);
